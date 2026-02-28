@@ -6,55 +6,123 @@ import numpy as np
 import os
 import tempfile
 import shutil
-from PIL import Image
 from docx import Document
 from docx.shared import Inches
 from openpyxl import Workbook
 from sklearn.cluster import KMeans
 import camelot
 
-st.set_page_config(page_title="Advanced PDF OCR System", layout="wide")
+st.set_page_config(page_title="Advanced Bangla PDF Converter", layout="wide")
 
-st.title("📄 Advanced PDF → DOCX + Excel")
-st.markdown("Supports Bangla + English | Multi-column | Images | Tables")
-
-# -----------------------------
-# IMAGE PREPROCESSING
-# -----------------------------
-def preprocess_image(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (5,5), 0)
-    thresh = cv2.adaptiveThreshold(
-        gray, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 11, 2
-    )
-    return thresh
-
+st.title("📄 Advanced Bangla PDF → DOCX + Excel")
+st.markdown("Supports Bijoy ANSI + Unicode + OCR fallback")
 
 # -----------------------------
-# OCR FUNCTION
+# BIJOY → UNICODE MAPPING (Core Characters)
+# -----------------------------
+def bijoy_to_unicode(text):
+
+    mapping = {
+        "Av": "আ",
+        "A": "অ",
+        "B": "ই",
+        "C": "ঈ",
+        "D": "উ",
+        "E": "ঊ",
+        "F": "ঋ",
+        "G": "এ",
+        "H": "ঐ",
+        "I": "ও",
+        "J": "ঔ",
+        "K": "ক",
+        "L": "খ",
+        "M": "গ",
+        "N": "ঘ",
+        "O": "ঙ",
+        "P": "চ",
+        "Q": "ছ",
+        "R": "জ",
+        "S": "ঝ",
+        "T": "ঞ",
+        "U": "ট",
+        "V": "ঠ",
+        "W": "ড",
+        "X": "ঢ",
+        "Y": "ণ",
+        "Z": "ত",
+        "a": "থ",
+        "b": "দ",
+        "c": "ধ",
+        "d": "ন",
+        "e": "প",
+        "f": "ফ",
+        "g": "ব",
+        "h": "ভ",
+        "i": "ম",
+        "j": "য",
+        "k": "র",
+        "l": "ল",
+        "m": "শ",
+        "n": "ষ",
+        "o": "স",
+        "p": "হ",
+        "q": "ড়",
+        "r": "ঢ়",
+        "s": "য়",
+        "t": "ং",
+        "u": "ঃ",
+        "v": "ঁ"
+    }
+
+    for key, value in mapping.items():
+        text = text.replace(key, value)
+
+    return text
+
+
+# -----------------------------
+# DETECT BIJOY TEXT
+# -----------------------------
+def looks_like_bijoy(text):
+    suspicious_patterns = ["wj", "‡", "†", "›"]
+    for p in suspicious_patterns:
+        if p in text:
+            return True
+    return False
+
+
+# -----------------------------
+# OCR FALLBACK
 # -----------------------------
 def ocr_page(page):
-    pix = page.get_pixmap(dpi=300)
+
+    pix = page.get_pixmap(dpi=400)
     img = np.frombuffer(pix.samples, dtype=np.uint8)
     img = img.reshape(pix.height, pix.width, pix.n)
 
-    processed = preprocess_image(img)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.equalizeHist(gray)
+
+    thresh = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, 15, 10
+    )
 
     text = pytesseract.image_to_string(
-        processed,
-        lang="eng+ben",
+        thresh,
+        lang="ben+eng",
         config="--oem 3 --psm 6"
     )
 
-    return [{"type": "text", "content": text, "y": 0}]
+    return text
 
 
 # -----------------------------
-# MULTI-COLUMN PARSER
+# MULTI COLUMN PARSER
 # -----------------------------
 def parse_layout(page):
+
     blocks = page.get_text("blocks")
     if not blocks:
         return []
@@ -78,55 +146,11 @@ def parse_layout(page):
     else:
         ordered = blocks
 
-    parsed = []
-    for b in ordered:
-        parsed.append({
-            "type": "text",
-            "content": b[4],
-            "y": b[1]
-        })
-
-    return parsed
+    return ordered
 
 
 # -----------------------------
-# IMAGE EXTRACTION
-# -----------------------------
-def extract_images(page, temp_dir):
-    images = []
-    image_list = page.get_images(full=True)
-
-    for img_index, img in enumerate(image_list):
-        xref = img[0]
-        base_image = page.parent.extract_image(xref)
-        image_bytes = base_image["image"]
-
-        image_path = os.path.join(temp_dir, f"img_{xref}.png")
-        with open(image_path, "wb") as f:
-            f.write(image_bytes)
-
-        images.append(image_path)
-
-    return images
-
-
-# -----------------------------
-# TABLE EXTRACTION
-# -----------------------------
-def extract_tables(pdf_path, page_number):
-    try:
-        tables = camelot.read_pdf(
-            pdf_path,
-            pages=str(page_number + 1),
-            flavor="stream"
-        )
-        return [t.df.values.tolist() for t in tables]
-    except:
-        return []
-
-
-# -----------------------------
-# MAIN PROCESSING
+# MAIN PROCESS
 # -----------------------------
 def process_pdf(pdf_path):
 
@@ -135,48 +159,37 @@ def process_pdf(pdf_path):
     workbook = Workbook()
     workbook.remove(workbook.active)
 
-    temp_dir = tempfile.mkdtemp()
-
     for page_num in range(len(doc)):
         page = doc[page_num]
 
-        text = page.get_text().strip()
+        raw_text = page.get_text()
 
-        # ---------- TEXT EXTRACTION ----------
-        if len(text) > 20:
-            layout_data = parse_layout(page)
+        # -------- BIJOY DETECTION --------
+        if looks_like_bijoy(raw_text):
+            text = bijoy_to_unicode(raw_text)
+        elif len(raw_text.strip()) > 20:
+            blocks = parse_layout(page)
+            text = ""
+            for b in blocks:
+                text += b[4] + "\n"
         else:
-            layout_data = ocr_page(page)
+            text = ocr_page(page)
 
-        # ---------- ADD TEXT TO DOC ----------
-        for block in layout_data:
-            document.add_paragraph(block["content"])
-
-        # ---------- ADD IMAGES ----------
-        images = extract_images(page, temp_dir)
-        for img_path in images:
-            document.add_picture(img_path, width=Inches(4))
-
+        # -------- DOCX --------
+        document.add_paragraph(text)
         document.add_page_break()
 
-        # ---------- TABLES ----------
-        tables = extract_tables(pdf_path, page_num)
-
+        # -------- EXCEL --------
         sheet = workbook.create_sheet(f"Page_{page_num+1}")
-        for table in tables:
-            for row in table:
-                sheet.append(row)
-            sheet.append([])
+        for line in text.split("\n"):
+            sheet.append([line])
 
-    # Save DOCX
+    # Save files
     doc_output = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
     document.save(doc_output.name)
 
-    # Save Excel
     excel_output = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
     workbook.save(excel_output.name)
-
-    shutil.rmtree(temp_dir)
 
     return doc_output.name, excel_output.name
 
@@ -203,20 +216,11 @@ if uploaded_file:
                 st.success("Processing Complete!")
 
                 with open(doc_path, "rb") as f:
-                    st.download_button(
-                        "Download DOCX",
-                        f,
-                        file_name="output.docx"
-                    )
+                    st.download_button("Download DOCX", f, file_name="output.docx")
 
                 with open(excel_path, "rb") as f:
-                    st.download_button(
-                        "Download Excel",
-                        f,
-                        file_name="output.xlsx"
-                    )
+                    st.download_button("Download Excel", f, file_name="output.xlsx")
 
-                # Auto cleanup
                 os.remove(temp_pdf.name)
                 os.remove(doc_path)
                 os.remove(excel_path)
