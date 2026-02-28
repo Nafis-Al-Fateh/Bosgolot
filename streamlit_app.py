@@ -3,195 +3,154 @@ import fitz
 import pytesseract
 import cv2
 import numpy as np
-import os
 import tempfile
-import shutil
+import os
 from docx import Document
-from docx.shared import Inches
 from openpyxl import Workbook
-from sklearn.cluster import KMeans
-import camelot
+from PIL import Image
+import shutil
 
-st.set_page_config(page_title="Advanced Bangla PDF Converter", layout="wide")
-
-st.title("📄 Advanced Bangla PDF → DOCX + Excel")
-st.markdown("Supports Bijoy ANSI + Unicode + OCR fallback")
-
-# -----------------------------
-# BIJOY → UNICODE MAPPING (Core Characters)
-# -----------------------------
-def bijoy_to_unicode(text):
-
-    mapping = {
-        "Av": "আ",
-        "A": "অ",
-        "B": "ই",
-        "C": "ঈ",
-        "D": "উ",
-        "E": "ঊ",
-        "F": "ঋ",
-        "G": "এ",
-        "H": "ঐ",
-        "I": "ও",
-        "J": "ঔ",
-        "K": "ক",
-        "L": "খ",
-        "M": "গ",
-        "N": "ঘ",
-        "O": "ঙ",
-        "P": "চ",
-        "Q": "ছ",
-        "R": "জ",
-        "S": "ঝ",
-        "T": "ঞ",
-        "U": "ট",
-        "V": "ঠ",
-        "W": "ড",
-        "X": "ঢ",
-        "Y": "ণ",
-        "Z": "ত",
-        "a": "থ",
-        "b": "দ",
-        "c": "ধ",
-        "d": "ন",
-        "e": "প",
-        "f": "ফ",
-        "g": "ব",
-        "h": "ভ",
-        "i": "ম",
-        "j": "য",
-        "k": "র",
-        "l": "ল",
-        "m": "শ",
-        "n": "ষ",
-        "o": "স",
-        "p": "হ",
-        "q": "ড়",
-        "r": "ঢ়",
-        "s": "য়",
-        "t": "ং",
-        "u": "ঃ",
-        "v": "ঁ"
-    }
-
-    for key, value in mapping.items():
-        text = text.replace(key, value)
-
-    return text
-
+st.set_page_config(page_title="Bangla PDF OCR System", layout="wide")
+st.title("📄 PDF → DOCX + Excel (Image-Based Multi-Page OCR)")
+st.markdown("High Resolution Image OCR | Bangla + English | No Encoding Errors")
 
 # -----------------------------
-# DETECT BIJOY TEXT
+# IMAGE PREPROCESSING
 # -----------------------------
-def looks_like_bijoy(text):
-    suspicious_patterns = ["wj", "‡", "†", "›"]
-    for p in suspicious_patterns:
-        if p in text:
-            return True
-    return False
+def preprocess_image(image):
 
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-# -----------------------------
-# OCR FALLBACK
-# -----------------------------
-def ocr_page(page):
-
-    pix = page.get_pixmap(dpi=400)
-    img = np.frombuffer(pix.samples, dtype=np.uint8)
-    img = img.reshape(pix.height, pix.width, pix.n)
-
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    # contrast enhancement
     gray = cv2.equalizeHist(gray)
 
+    # noise removal
+    gray = cv2.fastNlMeansDenoising(gray, None, 30, 7, 21)
+
+    # adaptive threshold
     thresh = cv2.adaptiveThreshold(
-        gray, 255,
+        gray,
+        255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 15, 10
+        cv2.THRESH_BINARY,
+        15,
+        8
     )
 
-    text = pytesseract.image_to_string(
-        thresh,
+    return thresh
+
+
+# -----------------------------
+# OCR WITH STRUCTURED DATA
+# -----------------------------
+def ocr_structured(image):
+
+    data = pytesseract.image_to_data(
+        image,
         lang="ben+eng",
-        config="--oem 3 --psm 6"
+        config="--oem 3 --psm 6",
+        output_type=pytesseract.Output.DICT
     )
 
-    return text
+    words = []
+    n = len(data["text"])
+
+    for i in range(n):
+        if int(data["conf"][i]) > 40:
+            text = data["text"][i].strip()
+            if text:
+                words.append({
+                    "text": text,
+                    "x": data["left"][i],
+                    "y": data["top"][i]
+                })
+
+    return words
 
 
 # -----------------------------
-# MULTI COLUMN PARSER
+# GROUP WORDS INTO LINES
 # -----------------------------
-def parse_layout(page):
+def group_into_lines(words):
 
-    blocks = page.get_text("blocks")
-    if not blocks:
-        return []
+    lines = {}
+    threshold = 15  # vertical grouping threshold
 
-    xs = np.array([[b[0]] for b in blocks])
+    for word in words:
+        y = word["y"]
 
-    if len(xs) > 1:
-        try:
-            kmeans = KMeans(n_clusters=2, random_state=0).fit(xs)
-            labels = kmeans.labels_
+        found = False
+        for key in lines.keys():
+            if abs(key - y) < threshold:
+                lines[key].append(word)
+                found = True
+                break
 
-            col1 = [blocks[i] for i in range(len(blocks)) if labels[i] == 0]
-            col2 = [blocks[i] for i in range(len(blocks)) if labels[i] == 1]
+        if not found:
+            lines[y] = [word]
 
-            col1.sort(key=lambda x: x[1])
-            col2.sort(key=lambda x: x[1])
+    sorted_lines = []
 
-            ordered = col1 + col2
-        except:
-            ordered = sorted(blocks, key=lambda x: x[1])
-    else:
-        ordered = blocks
+    for key in sorted(lines.keys()):
+        line_words = sorted(lines[key], key=lambda x: x["x"])
+        line_text = " ".join([w["text"] for w in line_words])
+        sorted_lines.append(line_text)
 
-    return ordered
+    return sorted_lines
 
 
 # -----------------------------
-# MAIN PROCESS
+# PROCESS PDF
 # -----------------------------
 def process_pdf(pdf_path):
 
-    doc = fitz.open(pdf_path)
+    pdf = fitz.open(pdf_path)
+
     document = Document()
     workbook = Workbook()
     workbook.remove(workbook.active)
 
-    for page_num in range(len(doc)):
-        page = doc[page_num]
+    for page_index in range(len(pdf)):
 
-        raw_text = page.get_text()
+        page = pdf[page_index]
 
-        # -------- BIJOY DETECTION --------
-        if looks_like_bijoy(raw_text):
-            text = bijoy_to_unicode(raw_text)
-        elif len(raw_text.strip()) > 20:
-            blocks = parse_layout(page)
-            text = ""
-            for b in blocks:
-                text += b[4] + "\n"
-        else:
-            text = ocr_page(page)
+        # Convert page to high resolution image
+        pix = page.get_pixmap(dpi=400)
+        img = np.frombuffer(pix.samples, dtype=np.uint8)
+        img = img.reshape(pix.height, pix.width, pix.n)
 
-        # -------- DOCX --------
-        document.add_paragraph(text)
+        if pix.n == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+        processed = preprocess_image(img)
+
+        # OCR structured
+        words = ocr_structured(processed)
+
+        # Group into lines
+        lines = group_into_lines(words)
+
+        # Add to DOCX
+        for line in lines:
+            document.add_paragraph(line)
+
         document.add_page_break()
 
-        # -------- EXCEL --------
-        sheet = workbook.create_sheet(f"Page_{page_num+1}")
-        for line in text.split("\n"):
+        # Add to Excel (each page = new sheet)
+        sheet = workbook.create_sheet(f"Page_{page_index+1}")
+
+        for line in lines:
             sheet.append([line])
 
-    # Save files
-    doc_output = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
-    document.save(doc_output.name)
+    # Save DOCX
+    doc_file = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
+    document.save(doc_file.name)
 
-    excel_output = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
-    workbook.save(excel_output.name)
+    # Save Excel
+    excel_file = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+    workbook.save(excel_file.name)
 
-    return doc_output.name, excel_output.name
+    return doc_file.name, excel_file.name
 
 
 # -----------------------------
@@ -204,22 +163,33 @@ if uploaded_file:
     if uploaded_file.size > 10 * 1024 * 1024:
         st.error("File exceeds 10MB limit.")
     else:
+
         temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
         temp_pdf.write(uploaded_file.read())
         temp_pdf.close()
 
         if st.button("Process PDF"):
+
             try:
-                with st.spinner("Processing..."):
+                with st.spinner("Processing multi-page OCR..."):
+
                     doc_path, excel_path = process_pdf(temp_pdf.name)
 
                 st.success("Processing Complete!")
 
                 with open(doc_path, "rb") as f:
-                    st.download_button("Download DOCX", f, file_name="output.docx")
+                    st.download_button(
+                        "Download DOCX",
+                        f,
+                        file_name="output.docx"
+                    )
 
                 with open(excel_path, "rb") as f:
-                    st.download_button("Download Excel", f, file_name="output.xlsx")
+                    st.download_button(
+                        "Download Excel",
+                        f,
+                        file_name="output.xlsx"
+                    )
 
                 os.remove(temp_pdf.name)
                 os.remove(doc_path)
