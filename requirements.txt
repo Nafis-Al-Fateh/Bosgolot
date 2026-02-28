@@ -1,1 +1,10 @@
 streamlit
+pytesseract
+opencv-python-headless
+pillow
+pymupdf
+python-docx
+openpyxl
+camelot-py[cv]
+numpy
+scikit-learn
